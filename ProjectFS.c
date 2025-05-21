@@ -2,6 +2,13 @@
 #include <stdint.h>
 #include <windows.h>
 
+#define COMPORT "\\\\.\\COM7"
+#define BAUDRATE 115200
+#define DEADZONE 10
+#define PITCH_MODIFIER 1
+#define ROLL_MODIFIER 1
+#define YAW_MODIFIER 1
+
 void print_error(const char * context)
 {
     DWORD error_code = GetLastError();
@@ -104,7 +111,7 @@ SSIZE_T read_port(HANDLE port, uint8_t * buffer, size_t size)
     return received;
 }
 
-void SimulateKeystroke(char key, char key2) {
+void simulateKeystroke(char key, char key2) {
     INPUT input = {0};
     input.type = INPUT_KEYBOARD;
     input.ki.wVk = (WORD)key;
@@ -121,45 +128,74 @@ void SimulateKeystroke(char key, char key2) {
     SendInput(1, &input, sizeof(INPUT));
 }
 
-int parse_comma_separated_ints(const uint8_t *buffer, int *output, int max_output) {
+void simulateMouseMovement(float pitch, float yaw) {
+    // Convert pitch/yaw to delta movements
+    int dx = (int)(yaw * 1);
+    int dy = (int)(-pitch * 1); // Invert pitch if necessary
+
+    // Create INPUT structure
+    INPUT input = {0};
+    input.type = INPUT_MOUSE;
+    input.mi.dx = dx;
+    input.mi.dy = dy;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE;
+
+    // Send mouse input
+    SendInput(1, &input, sizeof(INPUT));
+}
+
+int parseBuffer(const uint8_t *buffer, int *output, int max_output) {
     if (buffer == NULL || output == NULL || max_output <= 0) {
         return 0;
     }
 
     // Find the 'R' character
-    const char *start = strchr((const char *)buffer, 'R');
-    if (start == NULL) {
-        return 0; // 'R' not found
+    const char *startR = strchr((const char *)buffer, 'R');
+    const char *startL = strchr((const char *)buffer, 'L');
+
+    if (startR != NULL) {
+        // Copy to a modifiable temporary buffer
+        char temp[256];
+        strncpy(temp, startR, sizeof(temp) - 1);
+        temp[sizeof(temp) - 1] = '\0';
+
+        int count = 0;
+        char *token = strtok(temp, ",");
+        while (token != NULL && count < max_output) {
+            output[count++] = atoi(token);
+            token = strtok(NULL, ",");
+        }
+        return 'R';
     }
+    else if (startL != NULL) {
+        // Copy to a modifiable temporary buffer
+        char temp[256];
+        strncpy(temp, startL, sizeof(temp) - 1);
+        temp[sizeof(temp) - 1] = '\0';
 
-    // Move past 'R'
-    start++; 
-
-    // Copy to a modifiable temporary buffer
-    char temp[256];
-    strncpy(temp, start, sizeof(temp) - 1);
-    temp[sizeof(temp) - 1] = '\0';
-
-    int count = 0;
-    char *token = strtok(temp, ",");
-    while (token != NULL && count < max_output) {
-        output[count++] = atoi(token);
-        token = strtok(NULL, ",");
+        int count = 0;
+        char *token = strtok(temp, ",");
+        while (token != NULL && count < max_output) {
+            output[count++] = atoi(token);
+            token = strtok(NULL, ",");
+        }
+        return 'L';
     }
-
-    return count;
+    else {
+        return 0; // Nothing  found
+    }
 }
 
 
 int main()
 {
-    printf("Program Starting...\n");
+    printf("Starting ProjectFS...\n");
     // COM ports higher than COM9 need the \\.\ prefix, which is written as
     // "\\\\.\\" in C because we need to escape the backslashes.
-    const char * device = "\\\\.\\COM7";
+    const char * device = COMPORT;
 
     // Choose the baud rate (bits per second).
-    uint32_t baud_rate = 115200;
+    uint32_t baud_rate = BAUDRATE;
 
     HANDLE port = open_serial_port(device, baud_rate);
     if (port == INVALID_HANDLE_VALUE) { return 1; }
@@ -170,38 +206,105 @@ int main()
         uint8_t buffer[255] = {0};
         int readData[255]= {0};
         SSIZE_T received = read_port(port, buffer, sizeof(buffer));
-        if (received > 6) {
-            parse_comma_separated_ints(buffer, readData, 8);
+        if (received > 16) {
+            int controller = parseBuffer(buffer, readData, 8);
             // Website for keystrokes
             // https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
-            if(readData[0] != 0)
-            {
-                //Pitch Keystroke
-                int pitch = readData[0];
+            if(controller == (int)'R') {
+                
+                if(readData[1] != 0 || readData[2] != 0)
+                {
+                    //Pitch & Yaw
+                    int pitch = readData[1] * PITCH_MODIFIER;
+                    int roll = readData[2] * ROLL_MODIFIER;
+                    printf("Pitch: %d, Roll %d\n", pitch ,roll); //print received data
+                    if(abs(pitch) > DEADZONE || abs(roll) > DEADZONE ) {
+                        simulateMouseMovement(pitch, roll);
+                    }
+                    
+                }
+                if(readData[3] != 0)
+                {
+                    //Roll Keystroke
+                    
+                    int yaw = readData[3] * YAW_MODIFIER;
+                    printf("Yaw %d\n", yaw); //print received data
+                    if(yaw > DEADZONE) {
+                        for(int i=0; i<yaw; i++) {
+                            simulateKeystroke('Q', NULL);
+                        }
+                    }
+                    else if (yaw < -DEADZONE) {
+                        for(int i=0; i>yaw; i--) {
+                            simulateKeystroke('E', NULL);
+                        }
+                    }
+                }
+                if(readData[4] > 0)
+                {
+                    //GPIO2 Keystroke
+                    printf("BTN PRESS...\n");
+                    simulateKeystroke(VK_LBUTTON, NULL); // Left Click
+                }
+                //printf("Pitch: %d, Roll %d, Yaw %d\n", readData[0],readData[1],readData[2]); //print received data
+                //printf("GPIO2 %d\n", readData[3]); //print received data
+                memset(buffer, 0, sizeof(buffer)); // empty buffer
             }
-            if(readData[1] != 0)
-            {
-                //Roll Keystroke
-                int roll = readData[1];
+            if (controller == 'L') {
+                if(readData[1] != NULL)
+                {
+                    int yMovement = readData[1];
+                    if(yMovement > 0) {
+                        for(int i=0; i<yMovement; i++) {
+                            simulateKeystroke('W', NULL);
+                        }
+                    }
+                    else if (yMovement < 0) {
+                        for(int i=0; i>yMovement; i--) {
+                            simulateKeystroke('S', NULL);
+                        }
+                    }
+                }
+                if(readData[2] != NULL)
+                {
+                    int xMovement = readData[2];
+                    if(xMovement > 0) {
+                        for(int i=0; i<xMovement; i++) {
+                            simulateKeystroke('A', NULL);
+                        }
+                    }
+                    else if (xMovement < 0) {
+                        for(int i=0; i>xMovement; i--) {
+                            simulateKeystroke('D', NULL);
+                        }
+                    }
+                }
+                if(readData[3] != NULL)
+                {
+                    int zMovement = readData[3];
+                    if(zMovement > 0) {
+                        for(int i=0; i<zMovement; i++) {
+                            simulateKeystroke(VK_SPACE, NULL); //spacebar
+                        }
+                    }
+                    else if (zMovement < 0) {
+                        for(int i=0; i>zMovement; i--) {
+                            simulateKeystroke(VK_CONTROL, NULL); //ctrl
+                        }
+                    }
+                }
+                if(readData[3] > 0)
+                {
+                    //GPIO2 Keystroke
+                    simulateKeystroke(VK_RBUTTON, NULL); // Right Click
+                    //simulateKeystroke(VK_LMENU, 'N'); // Left Alt + N
+                }
+
             }
-            if(readData[2] != 0)
-            {
-                //Yaw Keystroke
-                int yaw = readData[2];
-            }
-            if(readData[3] > 0)
-            {
-                //GPIO2 Keystroke
-                SimulateKeystroke('U', NULL);
-                SimulateKeystroke(0x10, 'A'); // Shift + a
-            }
-            //printf("Pitch: %d, Roll %d, Yaw %d\n", readData[0],readData[1],readData[2]); //print received data
-            //printf("GPIO2 %d\n", readData[3]); //print received data
-            memset(buffer, 0, sizeof(buffer)); // empty buffer
         }
     }
 
-    printf("Program Closing...\n");
+    printf("Closing Program...\n");
     CloseHandle(port);
     return 0;
 }

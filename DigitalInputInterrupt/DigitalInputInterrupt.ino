@@ -61,7 +61,7 @@ void sendMessage() {
   Serial.print(comMessage.yaw,0);
   Serial.print(",");
   Serial.print(comMessage.gpio2);
-  Serial.print(",");
+  Serial.print(",,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,");
   Serial.println("");
   clearOldData();
 }
